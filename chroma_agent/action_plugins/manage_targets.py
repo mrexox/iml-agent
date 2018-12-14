@@ -12,7 +12,6 @@ from xml.dom.minidom import parseString
 
 from chroma_agent import config
 from chroma_agent.action_plugins.manage_pacemaker import PreservePacemakerCorosyncState
-from chroma_agent.device_plugins.block_devices import get_local_mounts
 from chroma_agent.lib.shell import AgentShell
 from chroma_agent.log import console_log
 from iml_common.blockdevices.blockdevice import BlockDevice
@@ -123,12 +122,7 @@ def _get_resource_locations(xml):
     locations = {}
     for res in dom.getElementsByTagName("resource"):
         agent = res.getAttribute("resource_agent")
-        if agent in [
-            "ocf::chroma:Target",
-            "ocf::lustre:Lustre",
-            "ocf::chroma:ZFS",
-            "ocf::heartbeat:ZFS",
-        ]:
+        if agent in ["ocf::lustre:Lustre", "ocf::chroma:ZFS", "ocf::heartbeat:ZFS"]:
             resid = res.getAttribute("id")
             if (
                 res.getAttribute("role") in ["Started", "Stopping"]
@@ -549,81 +543,6 @@ def configure_target_ha(primary, device, ha_label, uuid, mount_point):
     return agent_result_ok
 
 
-def mount_target(uuid, pacemaker_ha_operation):
-    # This is called by the Target RA from corosync
-    info = _get_target_config(uuid)
-
-    import_retries = 60
-    succeeded = False
-
-    while import_retries > 0:
-        # This loop is needed due pools not being immediately importable during
-        # STONITH operations. Track: https://github.com/zfsonlinux/zfs/issues/6727
-        result = import_target(
-            info["device_type"], info["bdev"], pacemaker_ha_operation
-        )
-        succeeded = agent_result_is_ok(result)
-        if succeeded:
-            break
-        elif (not pacemaker_ha_operation) or (info["device_type"] != "zfs"):
-            exit(-1)
-        time.sleep(1)
-        import_retries -= 1
-
-    if succeeded is False:
-        exit(-1)
-
-    filesystem = FileSystem(info["backfstype"], info["bdev"])
-
-    try:
-        filesystem.mount(info["mntpt"])
-    except RuntimeError as err:
-        # Make sure we export any pools when a mount fails
-        export_target(info["device_type"], info["bdev"])
-
-        raise err
-
-
-def unmount_target(uuid):
-    # This is called by the Target RA from corosync
-
-    # only unmount targets that are controlled by chroma:Target
-    try:
-        result = AgentShell.run(["cibadmin", "--query", "--xpath", "//primitive"])
-    except OSError as err:
-        if err.errno != errno.ENOENT:
-            raise
-    if result.rc != 0:
-        exit(-1)
-    dom = parseString(result.stdout)
-
-    # Searches for <nvpair name="target" value=uuid> in
-    # <primitive provider="chroma" type="Target"> in dom
-    if not next(
-        (
-            ops
-            for res in dom.getElementsByTagName("primitive")
-            if res.getAttribute("provider") == "chroma"
-            and res.getAttribute("type") == "Target"
-            for ops in res.getElementsByTagName("nvpair")
-            if ops.getAttribute("name") == "target"
-            and ops.getAttribute("value") == uuid
-        ),
-        False,
-    ):
-        return
-    dom.unlink()
-
-    info = _get_target_config(uuid)
-
-    filesystem = FileSystem(info["backfstype"], info["bdev"])
-
-    filesystem.umount()
-
-    if agent_result_is_error(export_target(info["device_type"], info["bdev"])):
-        exit(-1)
-
-
 def import_target(device_type, path, pacemaker_ha_operation):
     """
     Passed a device type and a path import the device if such an operation make sense.
@@ -949,32 +868,6 @@ def _get_target_config(uuid):
     return info
 
 
-def target_running(uuid):
-    # This is called by the Target RA from corosync
-    from os import _exit
-
-    try:
-        info = _get_target_config(uuid)
-    except (KeyError, TypeError) as err:
-        # it can't possibly be running here if the config entry for
-        # it doesn't even exist, or if the store doesn't even exist!
-        console_log.warning("Exception getting target config: %s", err)
-        _exit(1)
-
-    filesystem = FileSystem(info["backfstype"], info["bdev"])
-
-    for device, mntpnt in get_local_mounts()[0:2]:
-        if (mntpnt == info["mntpt"]) and filesystem.devices_match(
-            device, info["bdev"], uuid
-        ):
-            _exit(0)
-
-    console_log.warning(
-        "Did not find mount with matching mntpt and device for %s", uuid
-    )
-    _exit(1)
-
-
 def purge_configuration(mgs_device_path, mgs_device_type, filesystem_name):
     mgs_bdev = BlockDevice(mgs_device_type, mgs_device_path)
 
@@ -983,6 +876,7 @@ def purge_configuration(mgs_device_path, mgs_device_type, filesystem_name):
     )
 
 
+# @Todo: What should happen here?
 def convert_targets(force=False):
     """
     Convert existing ocf:chroma:Target to ZFS + Lustre
@@ -1082,8 +976,6 @@ ACTIONS = [
     register_target,
     configure_target_ha,
     unconfigure_target_ha,
-    mount_target,
-    unmount_target,
     import_target,
     export_target,
     start_target,
@@ -1093,7 +985,6 @@ ACTIONS = [
     writeconf_target,
     failback_target,
     failover_target,
-    target_running,
     convert_targets,
     configure_target_store,
     unconfigure_target_store,
