@@ -6,10 +6,7 @@
 from datetime import datetime
 
 from chroma_agent.lib.shell import AgentShell
-from chroma_agent.device_plugins.block_devices import (
-    get_normalized_device_table,
-    get_local_mounts,
-)
+from chroma_agent.device_plugins.block_devices import is_path_mounted, scanner_cmd
 from iml_common.blockdevices.blockdevice import BlockDevice
 from chroma_agent.log import daemon_log
 from chroma_agent import config
@@ -52,11 +49,8 @@ class LocalTargets(object):
 
             targets = block_device.targets(uuid_name_to_target, device, daemon_log)
 
-            ndp = get_normalized_device_table()
-
-            mounted = ndp.normalized_device_path(device["path"]) in set(
-                [ndp.normalized_device_path(path) for path, _, _ in get_local_mounts()]
-            )
+            dev_tree = scanner_cmd("Stream").get("Root")
+            mounted = is_path_mounted(device["path"], dev_tree)
 
             for name in targets.names:
                 daemon_log.info(
